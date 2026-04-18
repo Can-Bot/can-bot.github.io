@@ -4,7 +4,7 @@
  * Usage:
  *   await SpotifyPlaylistFetch.init(CLIENT_ID, REDIRECT_URI)
  *   await SpotifyPlaylistFetch.loginIfNeeded()
- *   const tracks = await SpotifyPlaylistFetch.fetchFromUrl(playlistUrl)
+ *   const tracks = await SpotifyPlaylistFetch.fetchFromUrl(spotifyURL)
  */
 
 const SCOPES = [
@@ -184,72 +184,59 @@ async function exchangeCodeForToken(code) {
   localStorage.removeItem(KEYS.authState);
 }
 
-function extractPlaylistId(url) {
-  const match = url.match(/playlist\/([a-zA-Z0-9]+)/);
-  return match ? match[1] : null;
+// Replace extractPlaylistId with this, which handles both URL types
+function extractUrlInfo(url) {
+  const playlistMatch = url.match(/playlist\/([a-zA-Z0-9]+)/);
+  if (playlistMatch) return { type: "playlist", id: playlistMatch[1] };
+
+  const albumMatch = url.match(/album\/([a-zA-Z0-9]+)/);
+  if (albumMatch) return { type: "album", id: albumMatch[1] };
+
+  return null;
 }
 
-async function fetchFromUrl(playlistUrl) {
+async function fetchFromUrl(spotifyUrl) {
   if (!isAuthenticated()) {
     const refreshed = await refreshToken();
     if (!refreshed) throw new Error("Spotify authentication expired.");
   }
 
-  const id = extractPlaylistId(playlistUrl);
-  if (!id) throw new Error("Invalid Spotify playlist URL.");
+  const urlInfo = extractUrlInfo(spotifyUrl);
+  if (!urlInfo) throw new Error("Invalid Spotify URL. Paste a playlist or album link.");
 
-  // Fetch playlist metadata (name) separately
+  // Branch to the appropriate fetcher based on URL type
+  if (urlInfo.type === "album") {
+    return fetchAlbum(urlInfo.id);
+  } else {
+    return fetchPlaylist(urlInfo.id);
+  }
+}
+
+async function fetchPlaylist(id) {
   const metaRes = await fetch(
     `https://api.spotify.com/v1/playlists/${id}?fields=name`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
-
-  if (!metaRes.ok) {
-    if (metaRes.status === 403) {
-      throw new Error(
-        "Access denied by Spotify (403). Check Development Mode user allowlist or playlist privacy."
-      );
-    }
-    throw new Error(`Failed to fetch playlist metadata: ${metaRes.status}`);
-  }
-
+  if (!metaRes.ok) throw new Error(`Failed to fetch playlist metadata: ${metaRes.status}`);
   const meta = await metaRes.json();
+
   const results = [];
   let url = `https://api.spotify.com/v1/playlists/${id}/items`;
 
   while (url) {
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    if (!res.ok) {
-      if (res.status === 401) {
-        // Token expired or revoked — clear only Spotify keys, not all localStorage
-        clearSpotifyStorage();
-        accessToken = null;
-        throw new Error("Spotify session expired. Please log in again.");
-      }
-      if (res.status === 403) {
-        throw new Error(
-          "Access denied by Spotify (403). If your app is in Development Mode, " +
-          "add your account under 'Users and Access' in the Spotify Developer Dashboard. " +
-          "If the playlist is private, make sure you own it or have been granted access."
-        );
-      }
-      throw new Error(`Spotify API error: ${res.status}`);
-    }
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) handleApiError(res);
 
     const data = await res.json();
 
-    // Debug: log first raw item to confirm field structure
     if (results.length === 0 && data.items?.length > 0) {
       console.log("Spotify raw item sample:", JSON.stringify(data.items[0], null, 2));
     }
 
     results.push(
       ...data.items
-        .map((i) => i.track ?? i.item ?? null)  // handle both field names
-        .filter((t) => t && t.type === "track") // drop episodes and nulls
+        .map((i) => i.track ?? i.item ?? null)
+        .filter((t) => t && t.type === "track")
         .map((track) => ({
           uri: track.uri,
           name: track.name,
@@ -261,6 +248,61 @@ async function fetchFromUrl(playlistUrl) {
   }
 
   return { name: meta.name, tracks: results };
+}
+
+async function fetchAlbum(id) {
+  // Fetch album metadata (name + primary artist) and tracks in one go.
+  // Albums are always returned in disc/track order by the API, which is
+  // exactly what we want for Rockbox playback ordering.
+  const metaRes = await fetch(
+    `https://api.spotify.com/v1/albums/${id}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (!metaRes.ok) throw new Error(`Failed to fetch album: ${metaRes.status}`);
+  const album = await metaRes.json();
+
+  // The album name makes a natural playlist name, e.g. "OK Computer"
+  const name = album.name;
+
+  const results = [];
+  let url = `https://api.spotify.com/v1/albums/${id}/tracks?limit=50`;
+
+  while (url) {
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!res.ok) throw new Error(`Failed to fetch album tracks: ${res.status}`);
+
+    const data = await res.json();
+
+    results.push(
+      ...data.items.map((track) => ({
+        uri: track.uri,
+        name: track.name,
+        // Album tracks always have artists; fall back to album artist if empty
+        artists: track.artists?.length
+          ? track.artists.map((a) => a.name).join(", ")
+          : album.artists.map((a) => a.name).join(", "),
+      }))
+    );
+
+    url = data.next;
+  }
+
+  return { name, tracks: results };
+}
+
+// Extracted so both fetchers can share the same error handling logic
+function handleApiError(res) {
+  if (res.status === 401) {
+    clearSpotifyStorage();
+    accessToken = null;
+    throw new Error("Spotify session expired. Please log in again.");
+  }
+  if (res.status === 403) {
+    throw new Error(
+      "Access denied by Spotify (403). Check your Developer Dashboard allowlist."
+    );
+  }
+  throw new Error(`Spotify API error: ${res.status}`);
 }
 
 function disconnect() {

@@ -39,10 +39,10 @@ export function PlaylistSource({
           {spotifyConnected ? (
             <>
               <p className="connected-badge">● Connected to Spotify</p>
-              <label>Spotify Playlist URL</label>
+              <label>Spotify Playlist or Album URL</label>
               <input
                 type="text"
-                placeholder="https://open.spotify.com/playlist/…"
+                placeholder="https://open.spotify.com/playlist/… or https://open.spotify.com/album/…"
                 value={spotifyUrl}
                 onChange={(e) => onSpotifyUrlChange(e.target.value)}
               />
